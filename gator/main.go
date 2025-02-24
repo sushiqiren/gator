@@ -3,8 +3,12 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/xml"
 	"fmt"
+	"html"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"time"
 
@@ -127,6 +131,104 @@ func handlerUsers(s *state, cmd command) error {
 	return nil
 }
 
+func handlerAgg(s *state, cmd command) error {
+	ctx := context.Background()
+	feedURL := "https://www.wagslane.dev/index.xml"
+	feed, err := fetchFeed(ctx, feedURL)
+	if err != nil {
+		return fmt.Errorf("error fetching feed: %v", err)
+	}
+
+	fmt.Printf("Feed: %+v\n", feed)
+	return nil
+}
+
+func fetchFeed(ctx context.Context, feedURL string) (*RSSFeed, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, feedURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "gator")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to fetch feed: %s", resp.Status)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var feed RSSFeed
+	if err := xml.Unmarshal(body, &feed); err != nil {
+		return nil, err
+	}
+
+	// Unescape HTML entities in the feed
+	feed.Channel.Title = html.UnescapeString(feed.Channel.Title)
+	feed.Channel.Description = html.UnescapeString(feed.Channel.Description)
+	for i := range feed.Channel.Items {
+		feed.Channel.Items[i].Title = html.UnescapeString(feed.Channel.Items[i].Title)
+		feed.Channel.Items[i].Description = html.UnescapeString(feed.Channel.Items[i].Description)
+	}
+
+	return &feed, nil
+}
+
+func handlerAddFeed(s *state, cmd command) error {
+	if len(cmd.args) < 2 {
+		return fmt.Errorf("addfeed command expects a name and a URL argument")
+	}
+	feedName := cmd.args[0]
+	feedURL := cmd.args[1]
+
+	// Get the current user from the config
+	currentUser := s.cfg.CurrentUserName
+	user, err := s.db.GetUserByName(context.Background(), currentUser)
+	if err != nil {
+		return fmt.Errorf("error getting current user: %v", err)
+	}
+
+	// Create a new feed
+	newFeed := database.CreateFeedParams{
+		ID:        uuid.New(),
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+		Name:      feedName,
+		Url:       feedURL,
+		UserID:    user.ID,
+	}
+
+	createdFeed, err := s.db.CreateFeed(context.Background(), newFeed)
+	if err != nil {
+		return fmt.Errorf("error creating new feed: %v", err)
+	}
+
+	fmt.Printf("Feed created: %+v\n", createdFeed)
+	return nil
+}
+
+func handlerFeeds(s *state, cmd command) error {
+	feeds, err := s.db.GetFeedsWithUserNames(context.Background())
+	if err != nil {
+		return fmt.Errorf("error getting feeds: %v", err)
+	}
+
+	for _, feed := range feeds {
+		fmt.Printf("Feed Name: %s\n", feed.FeedName)
+		fmt.Printf("Feed URL: %s\n", feed.Url)
+		fmt.Printf("Created by: %s\n\n", feed.UserName)
+	}
+	return nil
+}
+
 func main() {
 	// Read the config file
 	cfg, err := config.Read()
@@ -161,6 +263,15 @@ func main() {
 
 	// Register the users handler function
 	cmds.register("users", handlerUsers)
+
+	// Register the agg handler function
+	cmds.register("agg", handlerAgg)
+
+	// Register the addfeed handler function
+	cmds.register("addfeed", handlerAddFeed)
+
+	// Register the feeds handler function
+	cmds.register("feeds", handlerFeeds)
 
 	// Use os.Args to get the command-line arguments passed in by the user
 	if len(os.Args) < 2 {
