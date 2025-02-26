@@ -90,9 +90,18 @@ FROM feeds
 WHERE url = $1
 `
 
-func (q *Queries) GetFeedByUrl(ctx context.Context, url string) (Feed, error) {
+type GetFeedByUrlRow struct {
+	ID        uuid.UUID
+	CreatedAt time.Time
+	UpdatedAt time.Time
+	Name      string
+	Url       string
+	UserID    uuid.UUID
+}
+
+func (q *Queries) GetFeedByUrl(ctx context.Context, url string) (GetFeedByUrlRow, error) {
 	row := q.db.QueryRowContext(ctx, getFeedByUrl, url)
-	var i Feed
+	var i GetFeedByUrlRow
 	err := row.Scan(
 		&i.ID,
 		&i.CreatedAt,

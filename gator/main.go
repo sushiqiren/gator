@@ -132,15 +132,28 @@ func handlerUsers(s *state, cmd command) error {
 }
 
 func handlerAgg(s *state, cmd command) error {
-	ctx := context.Background()
-	feedURL := "https://www.wagslane.dev/index.xml"
-	feed, err := fetchFeed(ctx, feedURL)
+	if len(cmd.args) < 1 {
+		return fmt.Errorf("agg command expects a time_between_reqs argument")
+	}
+	timeBetweenReqsStr := cmd.args[0]
+
+	// Parse the time_between_reqs argument
+	timeBetweenReqs, err := time.ParseDuration(timeBetweenReqsStr)
 	if err != nil {
-		return fmt.Errorf("error fetching feed: %v", err)
+		return fmt.Errorf("error parsing time_between_reqs: %v", err)
 	}
 
-	fmt.Printf("Feed: %+v\n", feed)
-	return nil
+	fmt.Printf("Collecting feeds every %s\n", timeBetweenReqs)
+
+	// Use a time.Ticker to run scrapeFeeds periodically
+	ticker := time.NewTicker(timeBetweenReqs)
+	defer ticker.Stop()
+
+	// Run scrapeFeeds immediately and then every time the ticker ticks
+	for {
+		scrapeFeeds(s)
+		<-ticker.C
+	}
 }
 
 func fetchFeed(ctx context.Context, feedURL string) (*RSSFeed, error) {
@@ -312,6 +325,35 @@ func middlewareLoggedIn(handler func(s *state, cmd command, user database.User) 
 		// Call the handler with the user
 		return handler(s, cmd, user)
 	}
+}
+
+func scrapeFeeds(s *state) error {
+	ctx := context.Background()
+
+	// Get the next feed to fetch
+	feed, err := s.db.GetNextFeedToFetch(ctx)
+	if err != nil {
+		return fmt.Errorf("error getting next feed to fetch: %v", err)
+	}
+
+	// Mark the feed as fetched
+	err = s.db.MarkFeedFetched(ctx, feed.ID)
+	if err != nil {
+		return fmt.Errorf("error marking feed as fetched: %v", err)
+	}
+
+	// Fetch the feed using the URL
+	feedData, err := fetchFeed(ctx, feed.Url)
+	if err != nil {
+		return fmt.Errorf("error fetching feed: %v", err)
+	}
+
+	// Iterate over the items in the feed and print their titles to the console
+	for _, item := range feedData.Channel.Items {
+		fmt.Printf("Title: %s\n", item.Title)
+	}
+
+	return nil
 }
 
 func main() {
