@@ -10,13 +10,15 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/sushiqiren/gator/internal/config"
 	"github.com/sushiqiren/gator/internal/database"
 
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
+	
 )
 
 type state struct {
@@ -313,6 +315,38 @@ func handlerUnfollow(s *state, cmd command, user database.User) error {
 	return nil
 }
 
+func handlerBrowse(s *state, cmd command, user database.User) error {
+	limit := 2
+	if len(cmd.args) > 0 {
+		var err error
+		limit, err = strconv.Atoi(cmd.args[0])
+		if err != nil {
+			return fmt.Errorf("error parsing limit: %v", err)
+		}
+	}
+
+	posts, err := s.db.GetPostsForUser(context.Background(), database.GetPostsForUserParams{
+		UserID: user.ID,
+		Limit:  int32(limit),
+	})
+	if err != nil {
+		return fmt.Errorf("error getting posts for user: %v", err)
+	}
+
+	for _, post := range posts {
+		fmt.Printf("Title: %s\n", post.Title)
+		fmt.Printf("URL: %s\n", post.Url)
+		if post.Description.Valid {
+			fmt.Printf("Description: %s\n", post.Description.String)
+		} else {
+			fmt.Printf("Description: NULL\n")
+		}
+		fmt.Printf("Published At: %s\n\n", post.PublishedAt.Time)
+	}
+
+	return nil
+}
+
 func middlewareLoggedIn(handler func(s *state, cmd command, user database.User) error) func(*state, command) error {
 	return func(s *state, cmd command) error {
 		// Get the current user from the config
@@ -348,9 +382,43 @@ func scrapeFeeds(s *state) error {
 		return fmt.Errorf("error fetching feed: %v", err)
 	}
 
-	// Iterate over the items in the feed and print their titles to the console
+	// Iterate over the items in the feed and save them to the database
 	for _, item := range feedData.Channel.Items {
 		fmt.Printf("Title: %s\n", item.Title)
+
+		// Parse the published date
+		publishedAt, err := time.Parse(time.RFC1123Z, item.PubDate)
+		if err != nil {
+			publishedAt, err = time.Parse(time.RFC1123, item.PubDate)
+			if err != nil {
+				log.Printf("error parsing published date: %v", err)
+				continue
+			}
+		}
+
+		// Convert description to sql.NullString
+		description := sql.NullString{String: item.Description, Valid: item.Description != ""}
+
+		// Create a new post
+		newPost := database.CreatePostParams{
+			ID:          uuid.New(),
+			CreatedAt:   time.Now(),
+			UpdatedAt:   time.Now(),
+			Title:       item.Title,
+			Url:         item.Link,
+			Description: description,
+			PublishedAt: sql.NullTime{Time: publishedAt, Valid: true},
+			FeedID:      feed.ID,
+		}
+
+		_, err = s.db.CreatePost(ctx, newPost)
+		if err != nil {
+			if pqErr, ok := err.(*pq.Error); ok && pqErr.Code == "23505" { // unique_violation
+				log.Printf("post with URL %s already exists, ignoring", item.Link)
+				continue
+			}
+			log.Printf("error creating new post: %v", err)
+		}
 	}
 
 	return nil
@@ -408,6 +476,9 @@ func main() {
 
 	// Register the unfollow handler function with middleware
 	cmds.register("unfollow", middlewareLoggedIn(handlerUnfollow))
+
+	// Register the browse handler function with middleware
+	cmds.register("browse", middlewareLoggedIn(handlerBrowse))
 
 	// Use os.Args to get the command-line arguments passed in by the user
 	if len(os.Args) < 2 {
